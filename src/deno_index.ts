@@ -2,6 +2,8 @@ import { serve } from "https://deno.land/std@0.202.0/http/server.ts";
 
 const TARGET_URL = "https://grok.com";
 const ORIGIN_DOMAIN = "grok.com"; // 注意：此处应仅为域名，不含协议
+const SITE_PASSWORD = Deno.env.get("site_password");
+const cookie = Deno.env.get("cookie");
 
 async function handleWebSocket(req: Request): Promise<Response> {
   const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
@@ -57,14 +59,57 @@ async function handleWebSocket(req: Request): Promise<Response> {
   return response;
 }
 
-const cookie = Deno.env.get("cookie");
+// 添加新的辅助函数
+function getCookie(headers: Headers, name: string): string | null {
+  const cookieHeader = headers.get('cookie');
+  if (!cookieHeader) return null;
+  
+  const cookies = cookieHeader.split(';').map(c => c.trim());
+  const cookie = cookies.find(c => c.startsWith(`${name}=`));
+  return cookie ? cookie.split('=')[1] : null;
+}
+
+// 读取密码页面
+const passwordPage = await Deno.readTextFile('./src/password_page.html');
 
 const handler = async (req: Request): Promise<Response> => {
+  const url = new URL(req.url);
+
+  // 验证密码的端点
+  if (url.pathname === '/verify-password' && req.method === 'POST') {
+    try {
+      const body = await req.json();
+      if (body.password === SITE_PASSWORD) {
+        const headers = new Headers();
+        headers.set('Set-Cookie', `auth=${SITE_PASSWORD}; Path=/; HttpOnly; SameSite=Strict`);
+        return new Response(JSON.stringify({ success: true }), {
+          headers,
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ success: false }), { status: 401 });
+    } catch (error) {
+      return new Response(JSON.stringify({ success: false }), { status: 400 });
+    }
+  }
+
+  // 检查认证状态
+  const authCookie = getCookie(req.headers, 'auth');
+  if (authCookie !== SITE_PASSWORD) {
+    // 如果未认证，返回密码页面
+    if (url.pathname === '/') {
+      return new Response(passwordPage, {
+        headers: { 'Content-Type': 'text/html' },
+      });
+    }
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  // WebSocket 处理
   if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
     return handleWebSocket(req);
   }
 
-  const url = new URL(req.url);
   const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
 
   // 构造代理请求
